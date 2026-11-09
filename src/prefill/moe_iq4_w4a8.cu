@@ -433,8 +433,10 @@ void launch(bool xs, const Tab16& tab, const Product& p, int64_t row_bytes, cuda
 }  // namespace
 
 // the compute capabilities the kernel's bits were checked against MMQ's on (prefill_iq4_w4a8_test): Ampere (8.0-8.8) and
-// Blackwell 12.0; Ada (8.9) has no card to test on, so it keeps MMQ
-static bool arch_ok(int cc) { return (cc >= 80 && cc < 89) || cc == 120; }
+// Blackwell 12.0
+// local build (2026-11-08): Ada 8.9 admitted for one machine's measurement — the sums are MMQ's by construction and
+// launch_splits_k reads the device's real MMQ configs, so the gate is the only arch-specific piece
+static bool arch_ok(int cc) { return (cc >= 80 && cc <= 89) || cc == 120; }
 
 void report_counts();
 int iq4_w4a8_mode() {

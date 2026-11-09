@@ -474,7 +474,7 @@ void Context::run(const Product& p, void* stream) {
     if (p.n <= 0 || p.max_rows <= 0) return;
 #if !defined(GGML_USE_HIP)
     // STRATA_IQ4_W4A8=1 (opt-in; =2: the IQ4_NL down products only): IQ4_XS / IQ4_NL products through the pipelined int8
-    // kernel of moe_iq4_w4a8.cu where it gives MMQ's tiling-mode bits (sm_80..sm_88, no stream-k split); it declines
+    // kernel of moe_iq4_w4a8.cu where it gives MMQ's tiling-mode bits (sm_80..sm_89, no stream-k split); it declines
     // every other product, and unset this function is unchanged
     if (const int m = iq4_w4a8_mode(); m == 1 || (m == 2 && p.type == GGML_TYPE_IQ4_NL)) {
         if (run_iq4_w4a8(p, stream)) {
