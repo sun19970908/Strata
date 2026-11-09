@@ -5974,6 +5974,20 @@ class Service:
                                else [self.vision.encode(src) for src in images])
                 finally:
                     self.last_image_at = time.time()
+                    if self.vision_held and os.environ.get("STRATA_VISION_UNLOAD_EARLY") == "1":
+                        # local only, not PR-shaped: the .sve embeddings are already on disk, so stop the GPU
+                        # reader here - still inside the turn, before generation takes the FIFO - and hand its VRAM
+                        # back to the expert cache.  The idle loop cannot do this: it loses the FIFO race to the
+                        # minutes-long decode, so the reader would otherwise squat on the cache for the whole answer.
+                        self.vision.unload()
+                        try:
+                            out = self.engine.vram(self._engine_reserve())
+                            print(f"[strata] images: the encoder stopped right after the picture, the expert cache "
+                                  f"took its VRAM back ({out.get('expert_cache_mib')} of "
+                                  f"{out.get('expert_cache_full_mib')} MiB)", flush=True)
+                        except ValueError as e:
+                            print(f"[strata] images: the cache did not grow back after the early stop: {e}", flush=True)
+                        self.vision_held = False
             # one <|image_pad|> per image -> one per image token.  Only the markers the template writes for an image
             # (right after <|vision_start|>) are images: the same text inside a message (an agent reading these docs,
             # #150) is kept as plain text, or it took an image's place and the counts no longer matched.
