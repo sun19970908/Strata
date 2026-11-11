@@ -3256,6 +3256,7 @@ class Vision:
         self.elastic = cfg.get("elastic") is True
         self.elastic_mib = int(cfg.get("elastic_mib") or 2048)
         self.elastic_idle_s = float(cfg.get("elastic_idle_s") or 120)
+        self.cuda_device = cfg.get("cuda_device")
         if not lazy and not self.elastic:
             self._start()
 
@@ -5127,12 +5128,13 @@ class Service:
             self._vision_room_check(v, "")
         if self.vision_held:
             time.sleep(0.2)          # the driver's free-VRAM counter shows the cache's release a moment later
-        free0, t0 = self.free_vram_mib(), time.time()
+        v_dev = getattr(v, "cuda_device", None)
+        free0, t0 = self.free_vram_mib(v_dev), time.time()
         try:
             v.restart()
         except Exception as e:      # a 503 as for a non-elastic encoder at a load, not a dropped connection
             raise EngineDied(f"the image encoder failed to start: {e}") from e
-        free1 = self.free_vram_mib()
+        free1 = self.free_vram_mib(v_dev)
         took = f", {free0 - free1} MiB of VRAM" if free0 is not None and free1 is not None else ""
         on_cpu = getattr(v, "on_cpu", False)
         print(f"[strata] images: the image encoder started in {time.time() - t0:.1f} s{', on the CPU' if on_cpu else took}", flush=True)
@@ -5147,10 +5149,11 @@ class Service:
     def _vision_room_check(self, v, note: str):
         """The expert cache cannot make room: the GPU reader goes into the VRAM that is free, if that is READER_NEEDS_MIB, else the
         CPU reader reads (a picture is read right either way)."""
-        free = self.free_vram_mib()
+        v_dev = getattr(v, "cuda_device", None)
+        free = self.free_vram_mib(v_dev)
         need = min(v.elastic_mib, READER_NEEDS_MIB)
         if free is not None and free < need and getattr(v, "use_cpu", lambda: False)():
-            print(f"[strata] images: only {free} MiB of VRAM is free and the GPU reader needs about {need}{note}: this picture is "
+            print(f"[strata] images: only {free} MiB of VRAM is free on GPU {v_dev or 0} and the GPU reader needs about {need}{note}: this picture is "
                   "read on the CPU", flush=True)
         elif note:
             print(f"[strata] images: the expert cache did not make room for the image encoder{note}; starting it anyway", flush=True)
@@ -5197,12 +5200,13 @@ class Service:
                     print(f"[strata] images: stopping the idle image encoder: {e}", flush=True)
         threading.Thread(target=loop, daemon=True).start()
 
-    def free_vram_mib(self) -> int | None:
+    def free_vram_mib(self, dev: int | None = None) -> int | None:
         """Free VRAM on the engine's (first) GPU, from the backend's reader - NVML, the amdgpu sysfs files (#301) or
         IOKit on macOS (Metal backend); None when it can't be read (then nothing is refused)."""
         try:
             from serve.telemetry import gpu_reader
-            g = gpu_reader(int(getattr(self, "gpu_index", 0) or 0), amd=getattr(self, "backend", None) == "hip")
+            target = int(getattr(self, "gpu_index", 0) or 0) if dev is None else int(dev)
+            g = gpu_reader(target, amd=getattr(self, "backend", None) == "hip")
             if not g.ok():
                 return None
             r = g.read()
