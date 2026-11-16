@@ -157,6 +157,21 @@ def effort_kwargs(value) -> dict:
     return {"enable_thinking": False} if level is None else {"reasoning_effort": level}
 
 
+CONTINUATION_BLOCKS = ("content", "reasoning_content")
+
+
+def parse_continue_final_message(value) -> bool | str | None:
+    """llama.cpp's continue_final_message value: true means AUTO; "content" and "reasoning_content" pick the
+    block of the final assistant message that the model continues.  false / null / absent means no continuation."""
+    if value is None or value is False:
+        return None
+    if value is True:
+        return True
+    if isinstance(value, str) and value in CONTINUATION_BLOCKS:
+        return value
+    raise ValueError('continue_final_message must be true, false, "content" or "reasoning_content"')
+
+
 def budget_effort(tokens) -> dict:
     """Anthropic's thinking budget (budget_tokens) -> a level: under 2K low, under 8K medium, else high."""
     try:
@@ -607,14 +622,11 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
     # message instead of starting a new one.  llama.cpp reads it from the request body, HF transformers
     # takes it as an apply_chat_template keyword, so both spellings are read and the body's wins.  Read
     # after the loop: `enable_thinking: false` replaces `kwargs` wholesale, so a value gathered inside it
-    # is dropped with the rest when the client's JSON lists continue_final_message first.  Booleans only:
-    # llama.cpp's string forms say which block of the message continues, and this renderer does not tell
-    # a reasoning block from the answer.
-    continue_final = req.get("continue_final_message")
-    if not isinstance(continue_final, bool):
-        continue_final = (req.get("chat_template_kwargs") or {}).get("continue_final_message")
-    if continue_final is True:
-        kwargs["continue_final_message"] = True
+    # is dropped with the rest when the client's JSON lists continue_final_message first.
+    source = req if "continue_final_message" in req else (req.get("chat_template_kwargs") or {})
+    continuation = parse_continue_final_message(source.get("continue_final_message"))
+    if continuation is not None:
+        kwargs["continue_final_message"] = continuation
     return _env_to_user(_late_system_to_user(messages)), tools, kwargs
 
 
@@ -768,6 +780,7 @@ class Event:
     call: ToolCall | None = None
 
 
+THINK_START = "<think>"
 THINK_END = "</think>"
 CALL_START = "<tool_call>"
 CALL_END = "</tool_call>"
