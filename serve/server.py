@@ -811,6 +811,12 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
                                  "         YOUR PC CAN BE SLOW OR STOP RESPONDING FOR 1-3 MINUTES NOW - this is normal.\n"
                                  "         Please wait and don't close this window"
                                  + ("; the browser opens when it is ready." if OPENS_BROWSER else "; the server says when it is ready."))
+                if "expert arena:" in line:
+                    if "using 4 KB pages" in line or "large pages refused" in line:
+                        say("page_mode", "  [!] 内存页面: 4KB 普通页面 (内存碎片导致 2MB 大页未锁定，速度会慢 10-20%)\n"
+                                         "         提示: 重启电脑后第一时间启动 Strata 即可重新锁定满血大页。")
+                    elif "large pages (" in line or ("large pages" in line and "refused" not in line):
+                        say("page_mode", "  [+] 内存大页: 成功锁定 2MB Large Pages (满血模式，TLB 零开销)")
                 elif " loaded " in line and "GiB at" in line:
                     say("loaded", "[strata] experts loaded: " + line.split(" loaded ", 1)[1].strip() +
                         f" ({time.time() - t0:.0f} s so far)")
