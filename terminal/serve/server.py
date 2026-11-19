@@ -311,7 +311,7 @@ from serve.server_parts.openai_api import (  # noqa: F401  (moved unchanged, fil
     logprob_span,
     openai_collect,
 )
-from serve.frontend import (CALL_END, CALL_START, FUNC_END, FUNC_START, THINK_END, ChatTemplate, Event, OutputParser,  # noqa: E402
+from serve.frontend import (CALL_END, CALL_START, FUNC_END, FUNC_START, THINK_END, THINK_START, ChatTemplate, Event, OutputParser, TemplateRequestError, _text_of,  # noqa: E402
                             parser_for_template, anthropic_to_messages, anthropic_tools,
                             forced_call, images_of, literal_tags, mark_think_literals, openai_to_messages, require_messages,
                             tool_choice_of, unmark_think_literals)
@@ -573,6 +573,12 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
             cut = chunk.rfind(b"\n") + 1
             pos += cut
             for line in chunk[:cut].decode("utf-8", "replace").splitlines():
+                if "expert arena:" in line:
+                    if "using 4 KB pages" in line or "large pages refused" in line:
+                        say("page_mode", "  [!] 内存页面: 4KB 普通页面 (内存碎片导致 2MB 大页未锁定，速度会慢 10-20%)\n"
+                                         "         提示: 重启电脑后第一时间启动 Strata 即可重新锁定满血大页。")
+                    elif "large pages (" in line or ("large pages" in line and "refused" not in line):
+                        say("page_mode", "  [+] 内存大页: 成功锁定 2MB Large Pages (满血模式，TLB 零开销)")
                 if "PLE on" in line or "expert arena:" in line or "experts via mmap" in line:   # #505: mapped
                     say("arena", f"[strata] {loading}\n"
                                  "         YOUR PC CAN BE SLOW OR STOP RESPONDING FOR 1-3 MINUTES NOW - this is normal.\n"
@@ -2863,6 +2869,7 @@ class Vision:
         self.elastic = cfg.get("elastic") is True
         self.elastic_mib = self.elastic_ask_mib(cfg, self.max_tokens)
         self.elastic_idle_s = float(cfg.get("elastic_idle_s") or 120)
+        self.cuda_device = cfg.get("cuda_device")
         if not lazy and not self.elastic:
             self._start()
 
@@ -4299,12 +4306,13 @@ class Service:
                     print(f"[strata] images: stopping the idle image encoder: {e}", flush=True)
         threading.Thread(target=loop, daemon=True).start()
 
-    def free_vram_mib(self) -> int | None:
+    def free_vram_mib(self, dev: int | None = None) -> int | None:
         """Free VRAM on the engine's (first) GPU, from the backend's reader - NVML, the amdgpu sysfs files (#301) or
         IOKit on macOS (Metal backend); None when it can't be read (then nothing is refused)."""
         try:
             from serve.telemetry import gpu_reader
-            g = gpu_reader(int(getattr(self, "gpu_index", 0) or 0), amd=getattr(self, "backend", None) == "hip")
+            target = int(getattr(self, "gpu_index", 0) or 0) if dev is None else int(dev)
+            g = gpu_reader(target, amd=getattr(self, "backend", None) == "hip")
             if not g.ok():
                 return None
             r = g.read()
@@ -4877,6 +4885,62 @@ class Service:
         thinking) is rendered as a default one up to the answer - the same prompt start, so the conversation cache
         keeps it - and its effort follows in a short system turn right before the answer (thinking off: the template's
         empty thinking block).  The engine (--tail-role-token) checkpoints in front of that turn."""
+        # continue_final_message (llama.cpp): remove the final assistant message from the template's messages,
+        # render the history, and append the template's generation prompt with the selected block prefilled.
+        # AUTO (true) continues content unless only reasoning_content is present.  CONTENT closes the thinking
+        # block and continues the answer; REASONING_CONTENT leaves it open and continues the thinking (#537: a
+        # literal <think> in the client's text is escaped before this method, so only the template's own tag is
+        # used here).  The effort_end split is skipped as before: it assumes a user turn before the answer.
+        continuation = kwargs.get("continue_final_message")
+        if continuation:
+            if not messages or messages[-1].get("role") != "assistant":
+                raise TemplateRequestError(
+                    "continue_final_message requires the last message to be an assistant message")
+            final = messages[-1]
+            if final.get("tool_calls"):
+                raise TemplateRequestError(
+                    "continue_final_message cannot continue an assistant message with tool_calls")
+            history = messages[:-1]
+            body = {k: v for k, v in kwargs.items() if k != "continue_final_message"}
+            base = self.template.render(history, tools=tools, add_generation_prompt=False, **body)
+            full = self.template.render(history, tools=tools, add_generation_prompt=True, **body)
+            # llama.cpp's generation prompt is the part the template adds after the shared history.  Keep
+            # only the full render's suffix, so the continued prompt has exactly the history plus the turn.
+            n = 0
+            while n < min(len(base), len(full)) and base[n] == full[n]:
+                n += 1
+            generation_prompt = full[n:]
+            content = _text_of(final.get("content"))
+            reasoning = final.get("reasoning_content") if isinstance(final.get("reasoning_content"), str) else ""
+            if continuation is True:
+                continuation = "reasoning_content" if reasoning and not final.get("content") else "content"
+            open_at = generation_prompt.find(THINK_START)
+            if open_at < 0:
+                if continuation == "reasoning_content":
+                    raise TemplateRequestError(
+                        "continue_final_message reasoning_content needs a reasoning block in the template")
+                return base + generation_prompt + content
+            # The template's own assistant opener/closer: <|im_start|>assistant\n<think>\n ... \n</think>\n\n.
+            # The reasoning block may be absent from a thinking-on generation prompt, so the closer is the
+            # template's usual one when it is not there to read.
+            open_end = open_at + len(THINK_START)
+            if generation_prompt[open_end:open_end + 1] == "\n":
+                open_end += 1
+            close_at = generation_prompt.find(THINK_END, open_end)
+            if close_at >= 0:
+                close_start = close_at
+                if close_start > 0 and generation_prompt[close_start - 1] == "\n":
+                    close_start -= 1
+                close_end = close_at + len(THINK_END)
+                while close_end < len(generation_prompt) and generation_prompt[close_end] in "\r\n":
+                    close_end += 1
+                close_text = generation_prompt[close_start:close_end]
+            else:
+                close_text = "\n" + THINK_END + "\n\n"
+            continued = generation_prompt[:open_at] + generation_prompt[open_at:open_end] + reasoning
+            if continuation == "content":
+                continued += close_text + content
+            return base + continued
         effort = kwargs.get("reasoning_effort")
         off = kwargs.get("enable_thinking") is False
         if not self.effort_end or (not off and effort in (None, "", "xhigh", "high")):
