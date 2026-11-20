@@ -30,7 +30,7 @@ def clean_env() -> dict:
 
 class ScriptMode(unittest.TestCase):
     def test_help_runs_from_a_foreign_folder(self):
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             r = subprocess.run([sys.executable, str(SERVER), "--help"], cwd=d, env=clean_env(), capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr[-800:])
         self.assertIn("usage:", r.stdout)
@@ -40,7 +40,7 @@ class ScriptMode(unittest.TestCase):
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             p = subprocess.Popen([sys.executable, str(SERVER), "--engine", "mock", "--host", "127.0.0.1", "--port", str(port)], cwd=d, env=clean_env(),
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             try:
